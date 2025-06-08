@@ -31,9 +31,9 @@ class CompareConfig:
     def __post_init__(self):
         if self.RADAR_METRICS is None:
             self.RADAR_METRICS = [
-                'load_balance_cv', 
-                'total_coupling', 
+                'load_cv',
+                'total_coupling',
                 'modularity',
-                'n1_security_score', 
+                'n1_security_score',
                 'critical_nodes_balance'
             ]
