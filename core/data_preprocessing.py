@@ -10,11 +10,18 @@ from torch_geometric.data import Data
 from typing import Tuple, Dict, Optional, List
 import scipy.sparse as sp
 from sklearn.preprocessing import StandardScaler, RobustScaler
+import warnings
 
 
-def clean_and_extract_features(mpc: Dict, K: int = 3, 
-                               normalize: bool = True,
-                               add_graph_features: bool = True) -> Tuple[int, float, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def clean_and_extract_features(
+        mpc: Dict, 
+        K: int = 3, 
+        normalize: bool = True,
+        add_graph_features: bool = True,
+        node_scaler: Optional[RobustScaler] = None,
+        edge_scaler: Optional[RobustScaler] = None,
+        return_scalers: bool = True
+) -> Tuple[int, float, pd.DataFrame, pd.DataFrame, pd.DataFrame, Optional[RobustScaler], Optional[RobustScaler]]:
     """
     清理原始 MATPOWER 案例文件并提取适用于图神经网络 (GNN) 的特征
     
@@ -23,6 +30,9 @@ def clean_and_extract_features(mpc: Dict, K: int = 3,
         K: 目标分区数
         normalize: 是否归一化特征
         add_graph_features: 是否添加图结构特征
+        node_scaler: 预训练的节点特征scaler（用于测试集）
+        edge_scaler: 预训练的边特征scaler（用于测试集）
+        return_scalers: 是否返回scaler对象
     
     Returns:
         K: 目标分区数
@@ -30,7 +40,15 @@ def clean_and_extract_features(mpc: Dict, K: int = 3,
         df_XN: 节点特征DataFrame
         df_Eidx: 边索引DataFrame
         df_XE: 边特征DataFrame
+        node_scaler: 节点特征scaler（如果return_scalers=True）
+        edge_scaler: 边特征scaler（如果return_scalers=True）
     """
+
+    # 基本数据验证
+    required_keys = ['baseMVA', 'bus', 'branch', 'gen']
+    for key in required_keys:
+        if key not in mpc:
+            raise ValueError(f"Missing required key in mpc: {key}")
     baseMVA = mpc['baseMVA']
     
     # 1. 清理支路容量
@@ -40,7 +58,7 @@ def clean_and_extract_features(mpc: Dict, K: int = 3,
         vals[vals == 0] = baseMVA
         branch[:, c] = vals
 
-    # 2. 提取节点特征
+ # ===================== 2. 节点特征 =====================
     bus = mpc['bus']
     nb = bus.shape[0]
     
@@ -62,8 +80,15 @@ def clean_and_extract_features(mpc: Dict, K: int = 3,
     baseKV_norm = baseKV / max_kv
     
     # 2.4 电压限制
-    Vmin = bus[:, 12]
-    Vmax = bus[:, 11]
+    if bus.shape[1] > 12:  # 检查列数
+        Vmin = bus[:, 12]
+        Vmax = bus[:, 11]
+    else:
+        # 使用默认值
+        Vmin = np.ones(nb) * 0.95
+        Vmax = np.ones(nb) * 1.05
+        warnings.warn("Bus data missing voltage limits, using defaults")
+    
     V_range = Vmax - Vmin
     V_mid = (Vmax + Vmin) / 2
     
@@ -150,13 +175,16 @@ def clean_and_extract_features(mpc: Dict, K: int = 3,
     
     # 归一化
     if normalize:
-        scaler = RobustScaler()
-        # 只归一化非one-hot编码的特征
-        X_N[:, 3:] = scaler.fit_transform(X_N[:, 3:])
+        if node_scaler is None:
+            node_scaler = RobustScaler()
+            # 只归一化非one-hot编码的特征
+            X_N[:, 3:] = node_scaler.fit_transform(X_N[:, 3:])
+        else:
+            X_N[:, 3:] = node_scaler.transform(X_N[:, 3:])
     
     df_XN = pd.DataFrame(X_N, columns=feature_names, index=np.arange(1, nb + 1))
 
-    # 3. 边索引
+# ===================== 3. 边特征 =====================
     E_idx = np.vstack([idx_f, idx_t])
     df_Eidx = pd.DataFrame(
         E_idx.T + 1,  # 转回 1-based
@@ -216,15 +244,25 @@ def clean_and_extract_features(mpc: Dict, K: int = 3,
     
     # 边特征归一化
     if normalize:
-        edge_scaler = RobustScaler()
+        if edge_scaler is None:
+            edge_scaler = RobustScaler()
+        
         # 不归一化二元特征
         non_binary_mask = [i for i in range(len(edge_feature_names)) 
                           if edge_feature_names[i] not in ['is_transformer', 'status']]
-        X_E[:, non_binary_mask] = edge_scaler.fit_transform(X_E[:, non_binary_mask])
+        
+        if edge_scaler is None or not hasattr(edge_scaler, 'scale_'):
+            X_E[:, non_binary_mask] = edge_scaler.fit_transform(X_E[:, non_binary_mask])
+        else:
+            X_E[:, non_binary_mask] = edge_scaler.transform(X_E[:, non_binary_mask])
     
     df_XE = pd.DataFrame(X_E, columns=edge_feature_names, index=np.arange(1, X_E.shape[0] + 1))
     
-    return K, baseMVA, df_XN, df_Eidx, df_XE
+    # 返回结果（根据参数决定是否包含scaler）
+    if return_scalers:
+        return K, baseMVA, df_XN, df_Eidx, df_XE, node_scaler, edge_scaler
+    else:
+        return K, baseMVA, df_XN, df_Eidx, df_XE
 
 
 def compute_clustering_coefficient(adj_matrix: np.ndarray) -> np.ndarray:
